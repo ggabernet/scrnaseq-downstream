@@ -1,0 +1,14 @@
+name: seurat-knitr
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - rstudio
+  - conda-forge::r-base=4.0.3
+  - conda-forge::r-seurat=3.2.2
+  - conda-forge::r-devtools
+  - conda-forge::r-knitr
+  - conda-forge::r-kableextra
+  - bioconda::bioconductor-limma
+  - conda-forge::r-gprofiler2

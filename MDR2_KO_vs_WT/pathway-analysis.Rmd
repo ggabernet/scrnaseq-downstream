@@ -1,0 +1,176 @@
+---
+title: "Pathway analysis"
+subtitle: "MDR2 KO vs TGR5 transgenic Mice liver cells"
+author: "Gisela Gabernet"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+    toc: true                               # table of contents
+    toc_float: true                        # float the table of contents to the left of the main document content
+    toc_depth: 3                            # header levels 1,2,3
+    theme: default
+    number_sections: true                   # add section numbering to headers
+    df_print: paged                         # tables are printed as an html table with support for pagination over rows and columns
+    css: ./corp-styles.css
+    highlight: pygments
+    pdf_document: true
+---
+
+<!-- QBiC Logo -->
+<img src="./logo.png" style="position:absolute;top:0px;right:0px;" height="120" width="120" />
+<div class="watermark">QBiC</div>
+
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(forcats)
+library(ggplot2)
+library(limma)
+library(cowplot)
+library(knitr)
+library(kableExtra)
+library(gprofiler2)
+knitr::opts_chunk$set(echo = TRUE)
+theme_set(theme_classic())
+outdir <- "results/pathway_analysis/"
+dir.create(outdir)
+```
+
+**Project Members:** 
+
+***Prof. Dr. Verena Keitel***
+
+verena.keitel@med.uni-duesseldorf.de
+
+Universitätsklinikum Düsseldorf
+
+\
+
+***Dr. Maria Reich***
+
+maria.reich@uni-duesseldorf.de
+
+Universitätsklinikum Düsseldorf
+
+
+\
+
+***Prof. Dr. Mathias Heikenwälder***
+
+m.heikenwaelder@dkfz-heidelberg.de
+
+DKFZ Heidelberg
+
+\
+
+
+\
+\
+**QBiC contacts:**
+
+Dr. Gisela Gabernet
+
+Bioinformatics project manager
+
+gisela.gabernet@qbic.uni-tuebingen.de
+
+
+***
+
+# Pathway analysis
+The pathway analysis results are stored under [results/pathway_analysis](./results/pathway_analysis), and explained in this section.
+
+## Enriched pathways plot
+The plot below summarizes the pathways that were found significantly enriched in DE genes for each contrast (padj value < 0.05). 
+Only contrasts for which an enriched pathway was found are shown. Both KEGG pathways and REACTOME (REAC) pathways were considered. 
+
+Hover over the dots to reveal the pathway names. 
+
+```{r, fig.width=8, fig.height=20, warning=FALSE, message=FALSE, echo=FALSE}
+  contrast_files <- list.files(path=paste0("results/DE_genes/"), pattern = "^(DE).*\\.(tsv)$")
+  organism = "mmusculus"
+  
+  q_list <- list()
+  q_names <- c()
+  for (file in contrast_files){
+    #Reading DE genes list
+    fname <- tools::file_path_sans_ext(basename(file))
+
+    DE_genes <- read.csv(file = paste0("results/DE_genes/", file), sep="\t", header = T)
+    if(nrow(DE_genes) <= 1){
+      next
+    }
+    q = as.character(DE_genes$gene)
+    q_list <- append(q_list, list(q))
+    q_names <- append(q_names, fname)
+  }
+  datasources <- c("KEGG","REAC")
+  names(q_list) <- q_names
+  
+  #gost query
+  gostres <- gost(query=q_list,
+                  organism=organism,
+                  significant=T,
+                  correction_method="gSCS",
+                  sources=datasources,
+                  evcodes = T,
+                  user_threshold=0.05)
+  
+  gostres_links <- gost(query=q_list,
+                  organism=organism,
+                  significant=T,
+                  correction_method="gSCS",
+                  sources=datasources,
+                  user_threshold=0.05,
+                  evcodes = T,
+                  as_short_link = T)
+  
+  path_enrich <- as.data.frame(gostres$result)
+
+  if (nrow(path_enrich) > 0){
+    pg <- gostplot(gostres, capped=T, interactive = F)
+    ggsave(pg, filename = paste0(outdir, "/", "pathway_enrichment_plot.pdf"), 
+          device="pdf", 
+          height=10*length(q_list), width=15, units="cm", limitsize=F)
+    ggsave(pg, filename = paste0(outdir, "/", "pathway_enrichment_plot.png"), 
+          device="png", 
+          height=10*length(q_list), width=15, units="cm", dpi=300, limitsize=F)
+    #pg2[['x']][['layout']][['annotations']][[1]][['x']] <- -0.05
+    #pg2 %>% layout(margin = list(l = 75, b = 100), width=500, height = 400*length(contrast_files))
+    pg_int <- gostplot(gostres, capped=T, interactive=T)
+    pg_int
+  } else {
+    cat("No enriched pathways were found.")
+  }
+```
+
+
+## Enriched pathways table
+
+Table summarizing all the enriched pathways. The results can also be inspected on the browser query under this link: `r gostres_links`. This table can be also found under [results/pathway_analysis](./results/pathway_analysis/enriched_pathways_table.tsv).
+
+```{r, echo=FALSE}
+if (nrow(path_enrich) > 0) {
+  df_subset <- data.frame(Contrast = path_enrich$query, 
+                          Pathway_name = path_enrich$term_name, 
+                          Pathway_code = path_enrich$term_id, 
+                          DE_genes = path_enrich$intersection_size, Pathway_size = path_enrich$term_size, 
+                          Fraction_DE = formatC(path_enrich$intersection_size / path_enrich$term_size, digits=3), 
+                          Padj = formatC(path_enrich$p_value, digits=3),
+                          DE_genes_names = path_enrich$intersection)
+  colnames <- c("Contrast", "Pathway name", "Pathway code", "DE genes in pathway (N)", "Total genes in pathway (N)", 
+  "Fraction of DE genes in pathway", "Padj value (pathway enrichment)", "DE genes names")
+  write.table(df_subset, file = paste0(outdir, "enriched_pathways_table.tsv"), sep = "\tsv", row.names = F, quote = F)
+  kable(df_subset, col.names = colnames) %>%
+    kable_styling("hover") %>%
+    scroll_box(width = "100%", height = "400px")
+}
+```
+
+
+
+# Methods
+
+For pathway analysis, the R package gprofiler2 v`r packageVersion("gprofiler2")` was employed. Graphs were produced in RStudio with `r R.version.string` mainly using the `R` package ggplot2 v`r packageVersion("ggplot2")`. 
+Final reports were produced using the `R` package rmarkdown v`r packageVersion("rmarkdown")`, with knitr v`r packageVersion("knitr")`.
