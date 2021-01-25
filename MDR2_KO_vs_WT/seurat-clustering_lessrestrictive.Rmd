@@ -1,0 +1,797 @@
+---
+title: "Single-cell RNAseq analysis"
+subtitle: "WT vs MRD2 KO Mice liver cells"
+author: "Gisela Gabernet"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document:
+    toc: true                               # table of contents
+    toc_float: true                        # float the table of contents to the left of the main document content
+    toc_depth: 3                            # header levels 1,2,3
+    theme: default
+    number_sections: true                   # add section numbering to headers
+    df_print: paged                         # tables are printed as an html table with support for pagination over rows and columns
+    css: ./corp-styles.css
+    highlight: pygments
+    pdf_document: true
+---
+
+<!-- QBiC Logo -->
+<img src="./logo.png" style="position:absolute;top:0px;right:0px;" height="120" width="120" />
+<div class="watermark">QBiC</div>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(forcats)
+library(ggplot2)
+library(limma)
+library(cowplot)
+library(knitr)
+library(kableExtra)
+
+theme_set(theme_classic())
+results_folder <- "results_lessrestrictive/"
+dir.create(results_folder)
+```
+
+**Project Members:** 
+
+***Prof. Dr. Verena Keitel***
+
+verena.keitel@med.uni-duesseldorf.de
+
+Universitätsklinikum Düsseldorf
+
+\
+
+***Dr. Maria Reich***
+
+maria.reich@uni-duesseldorf.de
+
+Universitätsklinikum Düsseldorf
+
+
+\
+
+***Prof. Dr. Mathias Heikenwälder***
+
+m.heikenwaelder@dkfz-heidelberg.de
+
+DKFZ Heidelberg
+
+\
+
+
+\
+\
+**QBiC contacts:**
+
+Dr. Gisela Gabernet
+
+Bioinformatics project manager
+
+gisela.gabernet@qbic.uni-tuebingen.de
+
+
+***
+
+# Introduction
+
+# Loading the dataset
+
+Loading all the individual samples.
+
+```{r , echo=FALSE}
+dataset_loc <- "."
+ids <- c("SI-GA-C1", "SI-GA-C2", "SI-GA-C3", 
+         "SI-GA-C4", "SI-GA-C5", "SI-GA-C6",
+         "SI-GA-C7", "SI-GA-C8")
+
+files <- c("sample-SI-GA-C1/outs/filtered_feature_bc_matrix/", 
+           "sample-SI-GA-C2/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C3/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C4/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C5/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C6/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C7/outs/filtered_feature_bc_matrix/",
+           "sample-SI-GA-C8/outs/filtered_feature_bc_matrix/")
+
+seurat_list <- list()
+# Initialize the Seurat object with the raw (non-normalized data).
+for (i in c(1:length(ids))) {
+  seurat_data <- Read10X(data.dir = files[i])
+  seurat_obj <- CreateSeuratObject(counts = seurat_data, project = ids[i])
+  seurat_list <- append(seurat_list, seurat_obj)
+}
+```
+
+Merging all samples in the dataset. The table represents the number of cells that are available for each sample.
+
+```{r, echo=FALSE}
+dkfz.all <- merge(seurat_list[[1]], y = c(seurat_list[[2]],
+                                          seurat_list[[3]],
+                                          seurat_list[[4]],
+                                          seurat_list[[5]],
+                                          seurat_list[[6]],
+                                          seurat_list[[7]],
+                                          seurat_list[[8]]), 
+                  add.cell.ids = c("C1","C2","C3","C4","C5","C6","C7","C8"), 
+                  project = "DKFZ_MDR2")
+```
+
+
+```{r, out.width="50%", echo=FALSE}
+tab <- as.data.frame(table(dkfz.all$orig.ident))
+colnames(tab) <- c("Condition", "Cell_number")
+kable(tab) %>%
+    kable_styling("hover")
+```
+
+Adding sample conditions. The table represents the number of cells that are available for each condition.
+
+```{r, echo=FALSE}
+samplename = dkfz.all@meta.data$orig.ident
+
+batchid = rep("WT",length(samplename))
+batchid[samplename %in% c("SI-GA-C3", "SI-GA-C4", "SI-GA-C7", "SI-GA-C8")] = "MDR2_KO"
+names(batchid) = rownames(dkfz.all@meta.data)
+
+dkfz.all <- AddMetaData(
+  object = dkfz.all,
+  metadata = batchid,
+  col.name = "grouping")
+```
+
+```{r, out.width="50%", echo=FALSE}
+tab <- as.data.frame(table(dkfz.all$grouping))
+colnames(tab) <- c("Condition", "Cell_number")
+kable(tab) %>%
+    kable_styling("hover")
+```
+
+# Standard pre-processing workflow
+
+Important QC params for eliminating bad quality cells (could be droplets without cells) are:
+
+* Number of unique genes detected in each cell
+* Total number of molecules detected within a cell
+
+Calculating the percentage of genes mapping to mitochondrial genome for QC:
+
+*  Low-quality / dying cells often exhibit extensive mitochondrial contamination
+* We calculate mitochondrial QC metrics with the PercentageFeatureSet function, which calculates the percentage of counts originating from a set of features
+* We use the set of all genes starting with mt- as a set of mitochondrial genes
+
+```{r, echo=FALSE}
+dkfz.all$percent.mt <- PercentageFeatureSet(dkfz.all, pattern = "^mt-", assay = 'RNA')
+#kable(head(dkfz.all@meta.data, 5))
+```
+
+Visualization of the QC metrics:
+
+* recommended to filter out the cells that have unique feature counts over 2500 or less than 200
+* recommended to filter out cells that have >10% mitochondrial counts
+  
+```{r, out.width="90%", fig.align="center", echo=FALSE}
+metadata <- dkfz.all@meta.data
+vln1 <- ggplot(data = metadata, aes(x=orig.ident, y=nCount_RNA, fill=orig.ident)) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) + 
+  xlab("") + ylab("") + ggtitle("Molecules / cell") +
+  NoLegend()
+vln2 <- ggplot(data = metadata, aes(x=orig.ident, y=nFeature_RNA, fill=orig.ident)) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) + 
+  xlab("") + ylab("") + ggtitle("Genes / cell") +
+  NoLegend()
+vln3 <- ggplot(data = metadata, aes(x=orig.ident, y=percent.mt, fill=orig.ident)) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) + 
+  xlab("") + ylab("") + ggtitle("% mitochondrial") +
+  NoLegend()
+qc_vln <- vln1 + vln2 + vln3
+qc_vln
+ggsave(paste0(results_folder,"quality_violin_plot.png"), qc_vln, device="png", width = 25, height = 8, units = "cm")
+ggsave(paste0(results_folder,"quality_violin_plot.pdf"), qc_vln, device="pdf", width = 25, height = 8, units = "cm")
+```
+
+
+```{r, out.width="90%", fig.align="center", echo=FALSE}
+### GenePlot(object = seurat, gene1 = ?, gene2 = ?)
+corr <- FeatureScatter(object = dkfz.all, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+corr
+ggsave(paste0(results_folder,"correlation_molecule_genes.png"), corr, device="png", width = 25, height = 8, units = "cm")
+ggsave(paste0(results_folder,"correlation_molecule_genes.pdf"), corr, device="pdf", width = 25, height = 8, units = "cm")
+```
+
+```{r, out.width="90%", fig.align="center", echo=FALSE}
+### GenePlot(object = seurat, gene1 = ?, gene2 = ?)
+dkfz.all@meta.data$gene_count_rank <- rank(1/dkfz.all@meta.data$nFeature_RNA)
+ggplot(data = dkfz.all@meta.data, aes(y=nFeature_RNA, x=gene_count_rank)) +
+  geom_point() + 
+  xlab("") + ylab("Genes / cell")
+#ggsave(paste0(results_folder,"correlation_molecule_genes.png"), corr, device="png", width = 25, height = 8, units = "cm")
+#ggsave(paste0(results_folder,"correlation_molecule_genes.pdf"), corr, device="pdf", width = 25, height = 8, units = "cm")
+```
+
+## Filtering out low quality cells
+
+Low quality cells need to be filtered out:
+
+* Filtering out the cells that have unique feature counts over 4000 or less than 200
+* Filtering out cells that have >10% mitochondrial counts
+
+After filtering low quality cells, the cell numbers per sample are the following:
+
+```{r, echo=FALSE}
+dkfz.all <- subset(dkfz.all, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 10)
+
+cells_per_sample = dkfz.all@meta.data$orig.ident
+
+```
+
+```{r echo=FALSE}
+tab <- as.data.frame(table(cells_per_sample))
+colnames(tab) <- c("Condition", "Cell_number")
+kable(tab) %>%
+    kable_styling("hover")
+```
+## Data normalization
+
+By default, we employ a global-scaling normalization method "LogNormalize" that normalizes the feature expression measurements for each cell by the total expression, multiplies this by a scale factor (10,000 by default), and log-transforms the result. 
+
+```{r, echo=FALSE, results='hide'}
+dkfz.all <- NormalizeData(dkfz.all, normalization.method = "LogNormalize", scale.factor = 10000, assay = 'RNA')
+
+```
+
+## Detection of highly variable features
+
+Detection of highly variable features. The displayed gene names represent the top 10 most variable genes.
+
+```{r, echo=FALSE, results='hide', warning=FALSE}
+dkfz.all <- FindVariableFeatures(dkfz.all, selection.method = "vst", nfeatures = 2000, assay = 'RNA')
+```
+
+```{r, echo=FALSE}
+top10 <- head(VariableFeatures(dkfz.all), 10)
+```
+
+
+```{r, echo=FALSE, warning=FALSE, results='hide'}
+plot1 <- VariableFeaturePlot(dkfz.all)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+var_featureplot <- plot2
+var_featureplot
+ggsave(paste0(results_folder,"variable_featureplot.png"), var_featureplot, device="png", width = 25, height = 10, units = "cm")
+ggsave(paste0(results_folder,"variable_featureplot.pdf"), var_featureplot, device="pdf", width = 25, height = 10, units = "cm")
+```
+
+## Linear dimensionality reduction
+
+Applies PCA to the highly variable features, after a standard scaling of the features to a mean of 0 and SD of 1.
+
+```{r, echo=FALSE, results='hide'}
+#all.genes <- rownames(dkfz.all)
+dkfz.all <- ScaleData(dkfz.all) 
+```
+
+```{r, echo=FALSE, results='hide', warning=FALSE}
+dkfz.all <- RunPCA(dkfz.all, features = VariableFeatures(object = dkfz.all))
+#print(dkfz.all[["pca"]], dims = 1:5, nfeatures = 5)
+loadings <- VizDimLoadings(dkfz.all, dims = 1:2, reduction = "pca")
+loadings
+dimplot <- DimPlot(dkfz.all, reduction = "pca")
+dimplot
+ggsave(paste0(results_folder,"pca_dimplot.png"), dimplot, device="png")
+ggsave(paste0(results_folder,"pca_dimplot.pdf"), dimplot, device="pdf")
+```
+
+## Determine dimensionality of data set
+
+Determining number of PCAs to consider for clustering from Elbow plot. It is recommended to go rather on the higher end of PCAs.
+
+```{r, echo=FALSE, results="hide", warning=FALSE}
+# JACKSTRAW PLOT NOTE: This process can take a long time for big datasets, comment out for expediency. More
+# approximate techniques such as those implemented in ElbowPlot() can be used to reduce
+# computation time
+#dkfz.all <- JackStraw(dkfz.all, num.replicate = 100)
+#dkfz.all <- ScoreJackStraw(dkfz.all, dims = 1:20)
+#jackstraw <- JackStrawPlot(dkfz.all, dims = 1:20)
+#ggsave2(paste0(results_folder,"jackstraw_plot.png"), jackstraw, device="png")
+#ggsave2(paste0(results_folder,"jackstraw_plot.pdf"), jackstraw, device="pdf")
+
+# Elbow plot for "dimensionality" determination
+elbow <- ElbowPlot(dkfz.all)
+elbow
+ggsave(paste0(results_folder,"elbow_plot.png"), elbow, device="png")
+ggsave(paste0(results_folder,"elbow_plot.pdf"), elbow, device="pdf")
+```
+
+```{r, echo=FALSE}
+pc_choose = 15
+```
+
+* Number of chosen PCs: `r pc_choose`.
+
+
+# Cell clustering
+
+As in PhenoGraph, we first construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the shared overlap in their local neighborhoods (Jaccard similarity). 
+
+This step is performed using the FindNeighbors function, and takes as input the previously defined dimensionality of the dataset.
+
+To cluster the cells, we next apply modularity optimization techniques such as the Louvain algorithm (default) or SLM, to iteratively group cells together, with the goal of optimizing the standard modularity function.
+
+<!-- The FindClusters function implements this procedure, and contains a resolution parameter that sets the 'granularity' of the  -->
+<!-- downstream clustering, with increased values leading to a greater number of clusters.  -->
+<!-- We find that setting this parameter between 0.4-1.2 typically returns good results for single-cell datasets of around 3K cells.  -->
+<!-- Optimal resolution often increases for larger datasets. The clusters can be found using the Idents function. -->
+
+```{r, echo=FALSE, warning=FALSE, results="hide"}
+dkfz.all <- FindNeighbors(dkfz.all, dims = 1:pc_choose)
+res_choose = 0.1
+dkfz.all <- FindClusters(dkfz.all, resolution = res_choose, save.SNN = T, random.seed = 42)
+```
+
+* Number of chosen PCs: `r pc_choose`.
+* Chosen resolution: `r res_choose`.
+
+## UMAP: Non-linear dimensionality reduction
+
+Non-linear dimensionality reduction method UMAP was applied to visualize the cell clusters.
+
+```{r, echo=FALSE, warning=FALSE, results="hide"}
+dkfz.all <- RunUMAP(dkfz.all, dims = 1:pc_choose)
+umap <- DimPlot(dkfz.all, reduction = "umap", label = T)
+umap
+ggsave(paste0(results_folder,"umap_plot.png"), umap, device="png")
+ggsave(paste0(results_folder,"umap_plot.pdf"), umap, device="pdf")
+```
+
+## Find differentially expressed features
+
+Finding markers (genes) that define clusters via differential gene expression expression. A table containing the top markers found for each of the clusters can be found under [results/markers/](./results/markers/top_20_markers_per_cluster.tsv). 
+
+
+```{r, echo=FALSE, warning=FALSE, results="hide"}
+dir.create(paste0(results_folder,"markers"))
+dkfz.all.markers <- FindAllMarkers(dkfz.all, only.pos=TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+dkfz.all.markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_logFC)
+write.table(dkfz.all.markers, paste0(results_folder,"markers/markers_table.tsv"), sep = "\t",row.names = F, quote = F)
+```
+
+Expression heatmap for the top 20 markers for each cluster. All plots for the markers can be found under [results/markers](./results/data/markers).
+
+```{r fig.height=10, fig.width=10, echo=FALSE, warning=FALSE, results="hide"}
+top20 <- dkfz.all.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_logFC)
+write.table(top20, file = paste0(results_folder,"top_20_markers_per_cluster.tsv"), sep = "\t", quote = F, row.names = F)
+
+heatmap <- DoHeatmap(dkfz.all, features = top20$gene) + NoLegend()
+heatmap
+ggsave(paste0(results_folder,"markers/heatmap_features_plot.png"), heatmap, device="png", width = 27, height = 30, units = "cm")
+ggsave(paste0(results_folder,"markers/heatmap_features_plot.pdf"), heatmap, device="pdf", width = 27, height = 30, units = "cm")
+```
+
+## Plotting provided markers
+
+All marker plots in this section can be found under [results/markers](./results/data/markers).
+
+### Markers for the cell types {.tabset .tabset-fade .tabset-pills}
+
+Choose the cell type:
+
+#### Cholangiocytes {-}
+
+```{r, fig.height=8, fig.width=10, echo=FALSE, warning=FALSE}
+dir.create(paste0(results_folder, "markers"))
+chol_markers <- FeaturePlot(dkfz.all,
+                        features = c("Krt19", "Krt7", "Epcam", 
+                                     "Diar5", "Sox9", "Cmd1", 
+                                     "Sra1", "Spp1", "Clu", "Tm4sf4"), 
+                        ncol = 3)
+chol_markers
+ggsave(paste0(results_folder,"markers/cholangiocyte_markers_featureplot.pdf"), chol_markers, device="pdf", width = 25, height = 25, units = "cm")
+ggsave(paste0(results_folder,"markers/cholangiocyte_markers_featureplot.png"), chol_markers, device="png", width = 25, height = 25, units = "cm")
+
+```
+
+#### Macrophage {-}
+
+```{r, fig.height=6, fig.width=10, echo=FALSE, warning=FALSE}
+macro_markers <- FeaturePlot(dkfz.all, 
+                         features = c("Adgre1", "Itgam", "C1qa", "Lyz2", "C1qb", "Clec4f"),
+                         ncol = 3)
+macro_markers
+ggsave(paste0(results_folder,"markers/macrophage_markers_featureplot.pdf"), macro_markers, device="pdf", width = 25, height = 15, units = "cm")
+ggsave(paste0(results_folder,"markers/macrophage_markers_featureplot.png"), macro_markers, device="png", width = 25, height = 15, units = "cm")
+```
+
+#### Kupffer cells {-}
+
+```{r, fig.height=3, fig.width=7, echo=FALSE, warning=FALSE}
+kupffer_markers <- FeaturePlot(dkfz.all, 
+                           features = c("Adgre1", "Clecsf", "Clec4f"))
+kupffer_markers
+ggsave(paste0(results_folder,"markers/kupffer_markers_featureplot.pdf"), kupffer_markers, device="pdf", width = 20, height = 7, units = "cm")
+ggsave(paste0(results_folder,"markers/kupffer_markers_featureplot.png"), kupffer_markers, device="png", width = 20, height = 7, units = "cm")
+```
+
+#### Hepatic Stellate {-}
+
+Provided Hepatic stellate cells markers: Des, Reln.
+Other markers in this cluster: Dcn, Gsn, Cxcl12, Lum
+```{r, fig.height=6, fig.width=10, echo=FALSE, warning=FALSE}
+stellate_markers <- FeaturePlot(dkfz.all, 
+                            features = c("Des", "Reln", "Dcn", "Gsn", "Cxcl12", "Lum"),
+                            ncol = 3)
+stellate_markers
+ggsave(paste0(results_folder,"markers/stellate_markers_featureplot.pdf"), stellate_markers, device="pdf", width = 25, height = 15, units = "cm")
+ggsave(paste0(results_folder,"markers/stellate_markers_featureplot.png"), stellate_markers, device="png", width = 25, height = 15, units = "cm")
+```
+
+#### Endothelial cells {-}
+
+```{r, fig.height=6, fig.width=10, echo=FALSE, warning=FALSE}
+endothelial_markers <- FeaturePlot(dkfz.all, 
+                               features = c("Pecam1", "Cd34", "Clec4g", "Ptprb", "Ehd3", "Dnase1l3"),
+                               ncol = 3)
+endothelial_markers
+ggsave(paste0(results_folder,"markers/endothelial_markers_featureplot.pdf"), endothelial_markers, device="pdf", width = 25, height = 15, units = "cm")
+ggsave(paste0(results_folder,"markers/endothelial_markers_featureplot.png"), endothelial_markers, device="png", width = 25, height = 15, units = "cm")
+```
+
+#### Fibroblasts {-}
+
+```{r, fig.height=6, fig.width=10, echo=FALSE, warning=FALSE}
+fibroblast_markers <- FeaturePlot(dkfz.all, 
+                              features = c("Col1a2", "Col1a1", "Col5a1", "Fn1", "Vim", "Acta2"),
+                              ncol = 3)
+fibroblast_markers
+ggsave(paste0(results_folder,"markers/fibroblast_markers_featureplot.pdf"), fibroblast_markers, device="pdf", width = 25, height = 25, units = "cm")
+ggsave(paste0(results_folder,"markers/fibroblast_markers_featureplot.png"), fibroblast_markers, device="png", width = 25, height = 25, units = "cm")
+```
+
+
+#### Hepatocytes {-}
+
+```{r, fig.height=8, fig.width=10, echo=FALSE}
+hepatocyte_markers <- FeaturePlot(dkfz.all, 
+                              features = c("Alb", "Krt8", "Krt18", "Pck1", "Serpina1a", "Serpina1c", "Serpina 1b", "Gstp1", "Mup20"),
+                              ncol = 3)
+hepatocyte_markers
+ggsave(paste0(results_folder,"markers/hepatocyte_markers_featureplot.pdf"), hepatocyte_markers, device="pdf", width = 25, height = 25, units = "cm")
+ggsave(paste0(results_folder,"markers/hepatocyte_markers_featureplot.png"), hepatocyte_markers, device="png", width = 25, height = 25, units = "cm")
+```
+
+#### Liver projenitor cells {-}
+Plotting provided liver progenitor cells (LPC) markers.
+```{r, fig.height=6, fig.width=10, echo=FALSE}
+lpc_markers <- FeaturePlot(dkfz.all, 
+                       features = c("Abcc1", "Cdc20", "Aldh18a1", "Capg"),
+                       ncol = 3)
+lpc_markers
+ggsave(paste0(results_folder,"markers/lpc_markers_featureplot.pdf"), lpc_markers, device="pdf", width = 25, height = 15, units = "cm")
+ggsave(paste0(results_folder,"markers/lpc_markers_featureplot.png"), lpc_markers, device="png", width = 25, height = 15, units = "cm")
+```
+
+#### B-lymphocytes {-}
+```{r, fig.height=8, fig.width=10, echo=FALSE}
+clus5_markers <- FeaturePlot(dkfz.all, 
+                       features = c("Igkc", "Ighm", "Cd79a", "Cd79b", "Cd74", "Cd37", "Iglc1", "Iglc2", "Ms4a1"),
+                       ncol = 3)
+clus5_markers
+ggsave(paste0(results_folder,"markers/Bcell_markers_featureplot.pdf"), clus5_markers, device="pdf", width = 25, height = 25, units = "cm")
+ggsave(paste0(results_folder,"markers/Bcell_markers_featureplot.png"), clus5_markers, device="png", width = 25, height = 25, units = "cm")
+```
+
+#### T-lymphocytes {-}
+```{r, fig.height=8, fig.width=10, echo=FALSE}
+clus7_markers <- FeaturePlot(dkfz.all, 
+                       features = c("Ccl5", "Cd52", "Trbc2", "Nkg7", "Cd3g", "Ms4a4b", "Rac2", "Il7r", "Cd7"),
+                       ncol = 3)
+clus7_markers
+ggsave(paste0(results_folder,"markers/Tcell_markers_featureplot.pdf"), clus7_markers, device="pdf", width = 25, height = 25, units = "cm")
+ggsave(paste0(results_folder,"markers/Tcell_markers_featureplot.png"), clus7_markers, device="png", width = 25, height = 25, units = "cm")
+```
+
+# Cluster cell type assignment {.tabset .tabset-fade .tabset-pills}
+
+UMAP plot with cell type assignments according to gene expression profiles of the clusters. All UMAP plots are found under [results/umap](./results/umap).
+
+```{r echo=FALSE, results='hide', warning=FALSE}
+umap_folder <- paste0(results_folder,"umap/")
+dir.create(umap_folder)
+# Naming clusters with cell types
+new.cluster.ids <- c("Cholangiocytes", "Endothelial cells", "Hepatocytes", "Macrophage / Kupffer", "Hepatocytes",  "HSC & PF", "B-lymphocytes",  "T-lymphocytes", "Cholangiocytes")
+names(new.cluster.ids) <- levels(dkfz.all)
+
+dkfz.all <- RenameIdents(dkfz.all, new.cluster.ids)
+
+# Storing cell types in "CellType" column
+dkfz.all$CellType <- Idents(dkfz.all)
+```
+
+```{r echo=FALSE, warning=FALSE, results="hide"}
+Idents(dkfz.all) <- "CellType"
+umap_names <- DimPlot(dkfz.all, 
+                      reduction = "umap", 
+                      label = T, 
+                      pt.size = 0.5) + NoLegend()
+umap_names
+
+
+ggsave(paste0(umap_folder,"umap_plot_cellnames.png"), umap_names, device="png")
+ggsave(paste0(umap_folder,"umap_plot_cellnames.pdf"), umap_names, device="pdf")
+```
+
+Number of cells identified for each of the cell types:
+
+```{r echo=FALSE}
+tab <- as.data.frame(table(dkfz.all$CellType))
+colnames(tab) <- c("Condition", "Cell_number")
+kable(tab) %>%
+    kable_styling("hover")
+```
+
+Heatmap with the cell types names:
+
+```{r fig.height=10, fig.width=10, echo=FALSE, warning=FALSE, results="hide"}
+top10 <- dkfz.all.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_logFC)
+write.table(top10, file = paste0(results_folder,"top_10_markers_per_cluster_cellnames.tsv"), sep = "\t", quote = F, row.names = F)
+
+heatmap <- DoHeatmap(dkfz.all, features = top10$gene) + NoLegend()
+heatmap
+ggsave(paste0(results_folder,"markers/heatmap_features_plot_cellnames.png"), heatmap, device="png", width = 27, height = 30, units = "cm")
+ggsave(paste0(results_folder,"markers/heatmap_features_plot_cellnames.pdf"), heatmap, device="pdf", width = 27, height = 30, units = "cm")
+```
+
+Different representations of the UMAP plot. Choose the representation:
+
+## Samples {-}
+
+```{r fig.height=10, fig.width=6, echo=FALSE}
+Idents(dkfz.all) <- "orig.ident"
+umap_samples <-DimPlot(dkfz.all, 
+                     reduction = "umap",
+                     label = F,
+                     split.by = "ident",
+                     order = c("SI-GA-C8", "SI-GA-C7", "SI-GA-C4", "SI-GA-C3", "SI-GA-C6", "SI-GA-C5", "SI-GA-C2", "SI-GA-C1"),
+                     pt.size = 0.5,
+                     ncol = 2) + 
+              NoLegend()
+umap_samples
+ggsave(paste0(results_folder,"umap_plot_samples.png"), umap_samples, device="png", width = 12, height = 25, units = "cm")
+ggsave(paste0(results_folder,"umap_plot_samples.pdf"), umap_samples, device="pdf", width = 12, height = 25, units = "cm")
+```
+
+## Grouping {-}
+
+```{r fig.height=5, fig.width=10, echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+p1 <- DimPlot(dkfz.all, reduction = "umap", group.by = "grouping")
+p2 <- DimPlot(dkfz.all, reduction = "umap", label = T) + NoLegend()
+umap_grid_plot <- plot_grid(p1, p2)
+umap_grid_plot
+
+ggsave(paste0(results_folder,"umap_grid_plot.png"), umap_grid_plot, device="png", width = 30, height = 15, units = "cm")
+ggsave(paste0(results_folder,"umap_grid_plot.pdf"), umap_grid_plot, device="pdf", width = 30, height = 15, units = "cm")
+```
+
+
+## Grouping split {-}
+```{r fig.height=5, fig.width=10, echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+umap_split <- DimPlot(dkfz.all, reduction = "umap", split.by = "grouping")
+umap_split
+
+ggsave(paste0(results_folder,"umap_split_grouping_plot.png"), umap_split, device="png", width = 30, height = 15, units = "cm")
+ggsave(paste0(results_folder,"umap_split_grouping_plot.pdf"), umap_split, device="pdf", width = 30, height = 15, units = "cm")
+```
+
+
+
+<!-- UMAP with replicates and markers: -->
+
+```{r fig.height=8, fig.width=12, echo=FALSE, include=FALSE}
+Idents(dkfz.all) <- "orig.ident"
+umap_samples_markers <- FeaturePlot(dkfz.all,
+                           features = c("Epcam", "Serpina1c", "Lum", "Clec4g", "C1qa", "Cd79a", "Cd3g"),
+                           split.by = "orig.ident",
+                           interactive = F,
+                           ncol = 2) + NoLegend()
+umap_samples_markers
+ggsave(paste0(results_folder,"markers/umap_plot_samples_markers.png"), umap_samples_markers, device="png", width = 55, height = 40, units = "cm")
+ggsave(paste0(results_folder,"markers/umap_plot_samples_markers.pdf"), umap_samples_markers, device="pdf", width = 55, height = 40, units = "cm")
+```
+
+
+<!-- UMAP with grouping and markers: -->
+
+```{r fig.height=10, fig.width=3, echo=FALSE, include=FALSE}
+Idents(dkfz.all) <- "grouping"
+umap_grouping_markers <- FeaturePlot(dkfz.all,
+                           features = c("Epcam", "Serpina1c", "Lum", "Clec4g", "C1qa", "Cd79a", "Cd3g", "Abcb4", "Gpbar1"),
+                           split.by = "grouping",
+                           interactive = F,
+                           ncol = 2) + NoLegend()
+umap_grouping_markers
+ggsave(paste0(results_folder,"markers/umap_plot_grouping_markers.png"), umap_grouping_markers, device="png", width = 14, height = 50, units = "cm")
+ggsave(paste0(results_folder,"markers/umap_plot_grouping_markers.pdf"), umap_grouping_markers, device="pdf", width = 14, height = 50, units = "cm")
+```
+
+# Differential gene expression analysis {.tabset .tabset-fade .tabset-pills}
+
+The differential gene expression analysis was performed for each of the cell types, by comparing the MDR2 KO to the WT mice population. Here the results tables are displayed for each cell population.
+
+All tables for the Differential Gene Expression analysis can be found under [results/DE_genes](./results/DE_genes/).
+
+
+
+```{r echo=FALSE, warning=FALSE}
+theme_set(theme_cowplot())
+DE_folder <- paste0(results_folder, "DE_genes/")
+dir.create(DE_folder)
+dkfz.all$celltype.stim <- paste(dkfz.all$CellType, dkfz.all$grouping, sep = "_")
+```
+
+## Cholangiocytes {-}
+
+```{r echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+cell <- subset(dkfz.all, idents = "Cholangiocytes")
+Idents(cell) <- "grouping"
+avg.cell <- log1p(AverageExpression(cell, verbose = FALSE)$RNA)
+avg.cell$gene <- rownames(avg.cell)
+
+Idents(dkfz.all) <- "celltype.stim"
+KO.response <- FindMarkers(dkfz.all, ident.1 = "Cholangiocytes_MDR2_KO", ident.2 = "Cholangiocytes_WT", verbose = FALSE)
+KO.response$gene <- row.names(KO.response)
+KO.response$log_pval_adj <- -log10(KO.response$p_val_adj)
+kable(head(KO.response, n = 20)) %>%
+    kable_styling("hover")
+write.table(KO.response[,c("gene","avg_logFC","p_val_adj")], file = paste0(DE_folder, "DE_genes_Cholangiocytes_KO_vs_WT.tsv"), sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r echo=FALSE, warning=FALSE, results='hide'}
+genes.to.label = row.names(KO.response)[1:20]
+vp <- ggplot(KO.response, aes(avg_logFC, log_pval_adj)) + 
+  geom_point()
+vp <- LabelPoints(plot = vp, points = genes.to.label, repel = TRUE)
+vp
+ggsave(paste0(DE_folder,"volcano_plot_Cholangiocytes_KO_vs_WT.png"), vp, device="png", width = 10, height = 8, units = "cm")
+ggsave(paste0(DE_folder,"volcano_plot_Cholangiocytes_KO_vs_WT.pdf"), vp, device="pdf", width = 10, height = 8, units = "cm")
+```
+
+## HSC & PF {-}
+
+```{r echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+cell <- subset(dkfz.all, idents = "HSC & PF")
+Idents(cell) <- "grouping"
+avg.cell <- log1p(AverageExpression(cell, verbose = FALSE)$RNA)
+avg.cell$gene <- rownames(avg.cell)
+
+Idents(dkfz.all) <- "celltype.stim"
+KO.response <- FindMarkers(dkfz.all, ident.1 = "HSC & PF_MDR2_KO", ident.2 = "HSC & PF_WT", verbose = FALSE)
+KO.response$gene <- row.names(KO.response)
+KO.response$log_pval_adj <- -log10(KO.response$p_val_adj)
+kable(head(KO.response, n = 20)) %>%
+    kable_styling("hover")
+write.table(KO.response[,c("gene","avg_logFC","p_val_adj")], file = paste0(DE_folder, "DE_genes_HSC & PF_KO_vs_WT.tsv"), sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r echo=FALSE, warning=FALSE, results='hide'}
+genes.to.label = row.names(KO.response)[1:20]
+vp <- ggplot(KO.response, aes(avg_logFC, log_pval_adj)) + 
+  geom_point()
+vp <- LabelPoints(plot = vp, points = genes.to.label, repel = TRUE)
+vp
+ggsave(paste0(DE_folder,"volcano_plot_HSC_PF_KO_vs_WT.png"), vp, device="png", width = 10, height = 8, units = "cm")
+ggsave(paste0(DE_folder,"volcano_plot_HSC_PF_KO_vs_WT.pdf"), vp, device="pdf", width = 10, height = 8, units = "cm")
+```
+
+## Macrophage / Kupffer {-}
+
+```{r echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+cell <- subset(dkfz.all, idents = "Macrophage / Kupffer")
+Idents(cell) <- "grouping"
+avg.cell <- log1p(AverageExpression(cell, verbose = FALSE)$RNA)
+avg.cell$gene <- rownames(avg.cell)
+
+Idents(dkfz.all) <- "celltype.stim"
+KO.response <- FindMarkers(dkfz.all, ident.1 = "Macrophage / Kupffer_MDR2_KO", ident.2 = "Macrophage / Kupffer_WT", verbose = FALSE)
+KO.response$gene <- row.names(KO.response)
+KO.response$log_pval_adj <- -log10(KO.response$p_val_adj)
+kable(head(KO.response, n = 20)) %>%
+    kable_styling("hover")
+write.table(KO.response[,c("gene","avg_logFC","p_val_adj")], file = paste0(DE_folder, "DE_genes_Macrophage_Kupffer_KO_vs_WT.tsv"), sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r echo=FALSE, warning=FALSE, results='hide'}
+genes.to.label = row.names(KO.response)[1:20]
+vp <- ggplot(KO.response, aes(avg_logFC, log_pval_adj)) + 
+  geom_point()
+vp <- LabelPoints(plot = vp, points = genes.to.label, repel = TRUE)
+vp
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Macrophage_Kupffer_KO_vs_WT.png"), vp, device="png", width = 10, height = 8, units = "cm")
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Macrophage_Kupffer_KO_vs_WT.pdf"), vp, device="pdf", width = 10, height = 8, units = "cm")
+```
+
+
+## Endothelial {-}
+
+```{r echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+cell <- subset(dkfz.all, idents = "Endothelial cells")
+Idents(cell) <- "grouping"
+avg.cell <- log1p(AverageExpression(cell, verbose = FALSE)$RNA)
+avg.cell$gene <- rownames(avg.cell)
+
+Idents(dkfz.all) <- "celltype.stim"
+KO.response <- FindMarkers(dkfz.all, ident.1 = "Endothelial cells_MDR2_KO", ident.2 = "Endothelial cells_WT", verbose = FALSE)
+KO.response$gene <- row.names(KO.response)
+KO.response$log_pval_adj <- -log10(KO.response$p_val_adj)
+kable(head(KO.response, n = 20)) %>%
+    kable_styling("hover")
+write.table(KO.response[,c("gene","avg_logFC","p_val_adj")], file = paste0(DE_folder, "DE_genes_Endothelial_KO_vs_WT.tsv"), sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r echo=FALSE, warning=FALSE, results='hide'}
+genes.to.label = row.names(KO.response)[1:20]
+vp <- ggplot(KO.response, aes(avg_logFC, log_pval_adj)) + 
+  geom_point()
+vp <- LabelPoints(plot = vp, points = genes.to.label, repel = TRUE)
+vp
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Endothelial_KO_vs_WT.png"), vp, device="png", width = 10, height = 8, units = "cm")
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Endothelial_KO_vs_WT.pdf"), vp, device="pdf", width = 10, height = 8, units = "cm")
+```
+
+
+## Hepatocytes {-}
+
+```{r echo=FALSE}
+Idents(dkfz.all) <- "CellType"
+cell <- subset(dkfz.all, idents = "Hepatocytes")
+Idents(cell) <- "grouping"
+avg.cell <- log1p(AverageExpression(cell, verbose = FALSE)$RNA)
+avg.cell$gene <- rownames(avg.cell)
+
+Idents(dkfz.all) <- "celltype.stim"
+KO.response <- FindMarkers(dkfz.all, ident.1 = "Hepatocytes_MDR2_KO", ident.2 = "Hepatocytes_WT", verbose = FALSE)
+KO.response$gene <- row.names(KO.response)
+KO.response$log_pval_adj <- -log10(KO.response$p_val_adj)
+kable(head(KO.response, n = 20)) %>%
+    kable_styling("hover")
+write.table(KO.response[,c("gene","avg_logFC","p_val_adj")], file = paste0(DE_folder, "DE_genes_Hepatocytes_KO_vs_WT.tsv"), sep = "\t", quote = F, row.names = F)
+```
+
+
+```{r echo=FALSE, warning=FALSE, results='hide'}
+genes.to.label = row.names(KO.response)[1:20]
+vp <- ggplot(KO.response, aes(avg_logFC, log_pval_adj)) + 
+  geom_point()
+vp <- LabelPoints(plot = vp, points = genes.to.label, repel = TRUE)
+vp
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Hepatocytes_KO_vs_WT.png"), vp, device="png", width = 10, height = 8, units = "cm")
+ggsave(paste0(DE_folder,"volcano_plot_DE_genes_Hepatocytes_KO_vs_WT.pdf"), vp, device="pdf", width = 10, height = 8, units = "cm")
+```
+
+Saving R Seurat object:
+
+```{r echo=FALSE}
+saveRDS(dkfz.all, file = paste0(results_folder,"R_object_DKFZ_WT_KO_MD2_cluster_assignments.rds"))
+```
+
+
+# Methods
+
+For the single-cell data analysis the R package Seurat v`r packageVersion("seurat")` was employed. Graphs were produced in RStudio with `r R.version.string` mainly using the `R` package ggplot2 v`r packageVersion("ggplot2")`. Final reports were produced using the `R` package rmarkdown v`r packageVersion("rmarkdown")`, with knitr v`r packageVersion("knitr")`.
