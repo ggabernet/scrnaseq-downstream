@@ -4,11 +4,11 @@ navbar:
   title: "Reports"
   left:
   - text: "Home"
-   href: index.html
+    href: index.html
   - text: "MDR2 KO vs WT"
-   href: seurat-MDR2-KO-vs-WT.html
+    href: seurat-MDR2-KO-vs-WT.html
   - text: "TGR5 TG vs MDR2 KO"
-   href: TGR5-TG-vs-MDR2-KO.html
+    href: TGR5-TG-vs-MDR2-KO.html
 output:
   html_document:
- theme: cosmo
+theme: cosmo
