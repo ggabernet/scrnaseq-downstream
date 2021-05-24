@@ -31,7 +31,8 @@ The original Rmarkdown notebooks can be found on [GitHub](https://github.com/gga
 
 ### MDR2 KO vs WT experiment
 
-Single-cell RNAseq data analysis of extracted liver cells from wild-type mice and mice with a MDR2 gene knock-out.
+Single-cell RNAseq data analysis of extracted liver cells from wild-type mice and mice with a MDR2 gene knock-out. 
+The full data analysis procedure can be found in the [MDR2 KO vs WT notebook](https://ggabernet.github.io/scrnaseq-downstream/seurat-MDR2-KO-vs-WT.html).
 
 **A** Cholangiocytes (BECs) were enriched from whole liver lysates by FACS. UMAP visualization of 40.333 cells from wt and Abcb4-/- (MDR2 KO) mice (n=4 per genotype) showing cell clusters according to their gene expression.
 
@@ -57,6 +58,7 @@ include_graphics("images/KO_vs_WT_mainfigure_optionA_panelD.png")
 ### TGR5 TG vs MDR2 KO experiment
 
 Single-cell RNAseq data analysis of extracted liver cells from mice with a MDR2 gene knock-out and mice additionally with a TGR5 transgene overexpression.
+The full data analysis procedure can be found in the [TGR5 TG vs MDR2 KO notebook](https://ggabernet.github.io/scrnaseq-downstream/TGR5-TG-vs-MDR2-KO.html).
 
 **A** Intrahepatic Cholangiocytes (BECs) were enriched by FACS prior to scRNA-seq. Clustering of 47.764 cells from Abcb4-/-Tgr5wt (MDR5 KO, denoted as Abcb4-/-) and Abcb4-/-Tgr5Tg mice (n=4 per genotype) using expression of marker gene signatures
 ```{r echo=FALSE}
