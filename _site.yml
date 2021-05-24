@@ -3,7 +3,7 @@ output_dir: "docs"
 navbar:
   title: "Reports"
   left:
-  - text: "Home"
+  - text: "Info"
     href: index.html
   - text: "MDR2 KO vs WT"
     href: seurat-MDR2-KO-vs-WT.html

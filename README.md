@@ -1,6 +1,8 @@
-# scRNAseq analysis for liver cancer
+# single-cell RNAseq analysis for liver biology
 
 Data analysis scripts for the scRNAseq data after processing with the cellranger pipeline.
+
+The Rmarkdown notebooks are published at [https://ggabernet.github.io/scrnaseq-downstream/](https://ggabernet.github.io/scrnaseq-downstream/).
 
 These project results were published in the article:
 
@@ -11,10 +13,10 @@ These project results were published in the article:
 > _J Hepatol._ 2021 Apr 16:S0168-8278(21)00244-0.
 > doi: 10.1016/j.jhep.2021.03.029. Epub ahead of print. PMID: 33872692.
 
-## single-cell DEG analysis for the MDR2 KO vs WT experiment
+## MDR2 KO vs WT experiment
 
-scRNAseq data analysis, using the Seurat package, of extracted liver cells from wild-type mice and mice with a MDR2 gene knock-out. Contains conda environment `environment.yml` used for the analysis and Rmarkdown scripts.
+Single-cell RNAseq data analysis, using the Seurat package, of extracted liver cells from wild-type mice and mice with a MDR2 gene knock-out. Contains conda environment `environment.yml` used for the analysis and Rmarkdown scripts.
 
-## single-cell DEG analysis for the TGR5 TG vs MDR2 KO experiment
+## TGR5 TG vs MDR2 KO experiment
 
-scRNAseq data analysis, using the Seurat package, of extracted liver cells from mice with a MDR2 gene knock-out and mice additionally with a TGR5 transgene overexpression. Contains conda environment `environment.yml` used for the analysis and Rmarkdown scripts.
+Single-cell RNAseq data analysis, using the Seurat package, of extracted liver cells from mice with a MDR2 gene knock-out and mice additionally with a TGR5 transgene overexpression. Contains conda environment `environment.yml` used for the analysis and Rmarkdown scripts.
